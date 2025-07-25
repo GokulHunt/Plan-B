@@ -1,0 +1,714 @@
+---
+title: "Effect of CMV on CD4N_pct clones"
+author: "Gokul Seshadri"
+date: "2025-02-13"
+output:
+  html_document:
+    code_folding: hide
+    smart: false
+    theme: cerulean
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: false
+    number_sections: true
+    df_print: paged
+---
+
+```{r libraries, include=FALSE, echo=FALSE}
+# invoking necessary packages
+library("tidyverse")
+library("tibble")
+library("reshape2")
+library("multcompView")
+library("car")
+
+library('broom.mixed')
+library("ggplot2")
+library("glue")
+library("knitr")
+
+library("tableone")
+library("labelled")
+library("MatchIt")
+library("survey")
+
+knitr::opts_chunk$set(echo = TRUE, message = FALSE ,warning= FALSE,
+                      comment = "",fig.width = 12,fig.height = 8)
+```
+
+
+<div style="text-align: justify">
+### **Data Preparation**
+</div>
+
+Reading the dataset and doing appropriate type conversions
+
+```{r}
+# reading the combined dataframe
+data_df = read.csv('D:/RA/GitHub/Plan-B/Datasets/Final Datasets/CMV_clonotypes_lv.csv')
+
+# converting blocks and treatment into factors
+data_df$sex <- factor(data_df$sex)
+data_df$race <- factor(data_df$race, levels=c("Non-Hispanic White", "Non-Hispanic Black", "Hispanic", "Non-Hispanic Other"))
+data_df$smoke_stat <- factor(data_df$smoke_stat, levels=c("Never smokers", "Former smokers", "Current smokers"))
+
+# removing those with empty CMV status
+data_df = data_df[data_df$CMV_status != '', ]
+data_df$CMV_status <- ifelse(data_df$CMV_status == "Positive", 1, 0)
+
+# immune cell variables
+clonotypes = c('TRA_total', 'TRB_total', 'TRG_total',
+               'TRA_unique', 'TRB_unique', 'TRG_unique')
+```
+
+#### **Removing nulls**
+
+```{r}
+# null counts in each column
+sapply(data_df, function(x) sum(is.na(x)))
+
+# removing null rows in covariates
+columns_to_check =c('CMV_status', 'age', 'sex', 'race', 'CD4N_pct')
+filtered_df <- data_df %>% 
+                  filter(across(all_of(columns_to_check), ~ !is.na(.)))
+
+cat("\nFiltered data size:", nrow(filtered_df))
+```
+
+<br>
+<br>
+
+
+### **Investigating CMV's impact on CD4 naive T cells pct**
+#### **Finding the unadjusted mean difference**
+
+```{r}
+## finding un-adjusted ATE
+CD4N_pct_t = filtered_df$CD4N_pct[filtered_df$CMV_status == 1]
+CD4N_pct_c = filtered_df$CD4N_pct[filtered_df$CMV_status == 0]
+
+ATE = mean(CD4N_pct_t, na.rm = T) - mean(CD4N_pct_c, na.rm = T)
+
+# finding the weighted standard error
+SE = sqrt(var(CD4N_pct_t, na.rm = T)/length(CD4N_pct_t) + var(CD4N_pct_c, na.rm = T)/length(CD4N_pct_c))
+
+# finding the confidence interval
+CI = ATE + c(-1, 1) * qnorm(0.975) * SE
+
+# test for significance
+p_val = t.test(CD4N_pct_t, CD4N_pct_c, var.equal = TRUE)$p.value
+ 
+output1 <- data.frame(
+  Trt_Effect = round(ATE, 4),
+  Std_Err = round(SE, 4),
+  lower_CI = round(CI[1], 4),
+  upper_CI = round(CI[2], 4),
+  p_value = round(p_val, 4)
+)
+
+kable(output1, caption = "Unadjusted ATE of CMV on CD4N_pct", align = "c")
+```
+
+We can conclude that there is a statistically significant differences in the CD4N_pct clone count between CMV positive and negative individuals.
+
+<br>
+<br>
+
+
+#### **An adjusted model to find ATE and ATT**
+
+Average Treatment Effect of CMV on CD4N_pct clones
+```{r}
+# using the function to calculate ATE and CI from the homework 2 key
+calculate_ATE_lm <- function(model_formula, data, num_bootstraps = 100) {
+ 
+  model = lm(model_formula, data = data)
+  
+  data_trt = data_con <- data
+  data_trt$CMV_status = 1
+  data_con$CMV_status = 0
+  
+  pred1 = predict(model, newdata = data_trt, type = "response")
+  pred0 = predict(model, newdata = data_con, type = "response")
+  ATE = mean(pred1 - pred0, na.rm = TRUE)
+  
+  # Bootstrap replication for SE
+  ate_boot <- c()
+  set.seed(101)
+  for (i in 1:num_bootstraps) {
+    data_boot = data[sample(nrow(data), size = nrow(data), replace = TRUE), ]
+    model_boot = lm(model_formula, data = data_boot)
+    
+    data_trt_boot = data_con_boot <- data_boot
+    data_trt_boot$CMV_status = 1
+    data_con_boot$CMV_status = 0
+    
+    pred1_boot = predict(model_boot, newdata = data_trt_boot, type = "response")
+    pred0_boot = predict(model_boot, newdata = data_con_boot, type = "response")
+    ate_boot = c(ate_boot, mean(pred1_boot - pred0_boot, na.rm = TRUE))
+  }
+  
+  # Calculate standard error and confidence interval
+  SE = sd(ate_boot, na.rm = TRUE)
+  CI = ATE + c(-1, 1) * qnorm(0.975) * SE
+  CI_str = paste0(round(CI[1], 4), ", ", round(CI[2], 4))
+  
+  return(list(ATE = round(ATE, 4), SE = round(SE, 4), CI = CI_str))
+}
+
+
+# the average treatment effect (ATE)
+model_formula = CD4N_pct ~ CMV_status * age + sex + race + educ + smoke_stat + INFLAM_5 + comorb_idx + Tcells
+result_1 = calculate_ATE_lm(model_formula, filtered_df, num_bootstraps = 100)
+
+result_1 = data.frame(
+  Variable=c("ATE","SE","CI"),
+  Values = c(result_1$ATE, result_1$SE, result_1$CI)
+)
+
+kable(result_1, caption = "CD4N_pct: the average treatment effect (ATE)", align = "c")
+```
+
+Average Treatment Effect of the Treated due to CMV on CD4N_pct clones
+```{r}
+# using the function to calculate ATT and CI from the homework 2 key
+calculate_ATT_lm <- function(model_formula, data, num_bootstraps = 100) {
+ 
+  model <- lm(model_formula, data = data)
+  
+  data_trt <- data_con <- data[data$CMV_status == 1, ]
+  data_con$CMV_status = 0
+  
+  pred1 <- predict(model, newdata = data_trt, type = "response")
+  pred0 <- predict(model, newdata = data_con, type = "response")
+  ATT <- mean(pred1 - pred0, na.rm = TRUE)
+  
+  # Bootstrap replication for SE
+  att_boot <- c()
+  set.seed(101)
+  for (i in 1:num_bootstraps) {
+    data_boot <- data[sample(nrow(data), size = nrow(data), replace = TRUE), ]
+    model_boot <- lm(model_formula, data = data_boot)
+    
+    data_trt_boot <- data_con_boot <- data_boot[data_boot$CMV_status == 1, ]
+    data_con_boot$CMV_status = 0
+    
+    pred1_boot <- predict(model_boot, newdata = data_trt_boot, type = "response")
+    pred0_boot <- predict(model_boot, newdata = data_con_boot, type = "response")
+    att_boot <- c(att_boot, mean(pred1_boot - pred0_boot, na.rm = TRUE))
+  }
+  
+  # Calculate standard error and confidence interval
+  SE <- sd(att_boot)
+  CI <- ATT + c(-1, 1) * qnorm(0.975) * SE
+  CI_str <- paste0(round(CI[1], 4), ", ", round(CI[2], 4))
+  
+  return(list(ATT = round(ATT, 4), SE = round(SE, 4), CI = CI_str))
+}
+
+# the average treatment effect among the treated (ATT)
+model_formula = CD4N_pct ~ CMV_status * age + sex + race + educ + smoke_stat + INFLAM_5 + comorb_idx + Tcells
+result_1_1 = calculate_ATT_lm(model_formula, filtered_df, num_bootstraps = 100)
+
+result_1_1 <- data.frame(
+  Variable=c("ATT","SE","CI"),
+  Values = c(result_1_1$ATT, result_1_1$SE, result_1_1$CI)
+)
+
+kable(result_1_1, caption = "CD4N_pct: ATT", align = "c")
+```
+
+<br>
+<br>
+
+
+#### **Propensity score model**
+
+```{r}
+# removing null rows in covariates
+columns_to_check =c('age', 'sex', 'race', 'educ', 'smoke_stat', 'total_readCount', 'BMI', 'INFLAM_5', 'comorb_idx', 'Tcells')
+filtered_df2 <- filtered_df %>% 
+                  filter(across(all_of(columns_to_check), ~ !is.na(.)))
+
+cat("\nFiltered data size:", nrow(filtered_df2))
+```
+
+
+**Finding the IPW standardized mean difference among treatment groups**
+
+```{r}
+# calculating propensity scores and IPW
+mod_ps = glm(CMV_status ~ age + sex + race + educ + smoke_stat + INFLAM_5 + comorb_idx, family = binomial(), data = filtered_df2)
+
+filtered_df2$ps = predict(mod_ps, type = "response")
+filtered_df2$weight = filtered_df2$CMV_status/ filtered_df2$ps + (1 - filtered_df2$CMV_status)/(1 - filtered_df2$ps)
+
+# setting variable names for TableOne
+filtered_df2 = labelled::set_variable_labels(filtered_df2,
+                                      age = "Age at 2016",
+                                      sex = "Biological Sex",
+                                      race = "Racial Group",
+                                      educ = "Education Level",
+                                      smoke_stat = "Smoking Status",
+                                      mortality = "Mortality",
+                                      TRAB = "T alpha-beta clones",
+                                      Tcells = "T cells count",
+                                      CD4N_pct = "Naive Helper T cells pct",
+                                      BMI = "Body Mass Index",
+                                      INFLAM_5 = "Total Inflammation Score",
+                                      comorb_idx = "# of comorbidities"
+                                      )
+
+# # creating weighted survey data and computing SMD
+# svy_data = svydesign(ids=~1, data=filtered_df2, weights=~weight)
+# 
+# # creating a table one stratified by treatment group
+# cat_cols = c('sex', 'race', 'smoke_stat', 'mortality')
+# num_cols = c('age', 'educ', 'BMI', 'INFLAM_5', 'comorb_idx', 'Tcells', 'CD4N_pct', 'CD4N_pct')
+# all_cols = c(cat_cols, num_cols)
+# svy_table_one = svyCreateTableOne(vars = all_cols, factorVars = cat_cols, strata = "CMV_status", data=svy_data, test = FALSE)
+# 
+# t2 = print(svy_table_one, nonnormal=num_cols, showAllLevels=FALSE, varLabels = TRUE, smd=TRUE)
+```
+
+```{r}
+# kable(t2, caption = "**IPW weighted participant characteristics stratified by CMV**", align = "c")
+```
+
+```{r}
+# t2_df <- as.data.frame(t2)
+# write.csv(t2_df, "D:/MS/My Research/Plan B/Code/CMV and TCR/ps_weighted_tableone.csv", row.names = TRUE)
+```
+
+
+<br>
+<br>
+
+
+**Estimating the ATE and ATT using propensity score stratification**
+
+```{r}
+### For average treatment effect (ATE)
+# ps score stratification
+ps_quintile = cut(filtered_df2$ps, breaks = quantile(filtered_df2$ps, probs = seq(0, 1, by = 0.2)), include.lowest = TRUE, labels = FALSE)
+
+# finding TE for each quintile
+te_quintile = tapply(filtered_df2$CD4N_pct[filtered_df2$CMV_status == 1],
+                      ps_quintile[filtered_df2$CMV_status == 1], mean) -  
+               tapply(filtered_df2$CD4N_pct[filtered_df2$CMV_status == 0],
+                      ps_quintile[filtered_df2$CMV_status == 0], mean)
+
+# finding overall ATE based on ps score stratification
+ATE_PSS = sum(te_quintile * table(ps_quintile) / nrow(filtered_df), na.rm = TRUE)
+
+n = nrow(filtered_df)
+ATE_PSS_boot = c()
+set.seed(101)
+# bootstrapping to find standard error
+for(i in 1:100) {
+  filtered_boot = filtered_df2[sample(1:n, n, replace = TRUE), ]
+  mod_ps_boot = glm(CMV_status ~ age + sex + race + educ + smoke_stat + INFLAM_5 + comorb_idx + Tcells,
+                 data = filtered_boot, family = "binomial")
+  
+  ps_boot = predict(mod_ps_boot, type = "response")
+  
+  # ps score stratification
+  ps_quintile_boot = cut(ps_boot, breaks = quantile(ps_boot, probs = seq(0, 1, by = 0.2), na.rm = TRUE), include.lowest = TRUE, labels = FALSE)
+  
+  # finding TE for each quintile
+  te_quintile_boot = tapply(filtered_boot$CD4N_pct[filtered_boot$CMV_status == 1],
+                             ps_quintile_boot[filtered_boot$CMV_status == 1], mean) -
+                     tapply(filtered_boot$CD4N_pct[filtered_boot$CMV_status == 0],
+                             ps_quintile_boot[filtered_boot$CMV_status == 0], mean)
+  
+  # finding overall ATE based on ps score stratification
+  ATE_boot = sum(te_quintile_boot * table(ps_quintile_boot)/ n, na.rm = TRUE)
+  
+  ATE_PSS_boot <- c(ATE_PSS_boot, ATE_boot)
+}
+
+SE_ATE = sd(ATE_PSS_boot)
+CI_ATE_PSS = ATE_PSS + c(-1, 1) * qnorm(0.975) * SE_ATE
+
+result_2 = data.frame(
+  Variable=c("ATE","SE","lower_CI", "upper_CI"),
+  Values = c(ATE_PSS, SE_ATE, CI_ATE_PSS[1], CI_ATE_PSS[2])
+)
+
+kable(result_2, caption = "Estimate of ATE using PSS")
+```
+
+```{r}
+### For average treatment effect among the treated (ATT)
+# ps score stratification
+ps_quintile = cut(filtered_df2$ps, breaks = c(0, quantile(filtered_df2$ps[filtered_df2$CMV_status == 1], p = c(0.2, 0.4, 0.6, 0.8)), 1), labels = 1:5)
+
+# finding TE of the treated for each quintile
+te_quintile = tapply(filtered_df2$CD4N_pct[filtered_df2$CMV_status == 1],
+                      ps_quintile[filtered_df2$CMV_status == 1], mean) -  
+               tapply(filtered_df2$CD4N_pct[filtered_df2$CMV_status == 0],
+                      ps_quintile[filtered_df2$CMV_status == 0], mean)
+
+# finding overall ATT based on ps score stratification
+nA = nrow(filtered_df2[filtered_df2$CMV_status == 1, ])
+nAj = table(ps_quintile[filtered_df2$CMV_status == 1])
+
+ATT_PSS = sum(te_quintile * nAj / nA, na.rm = TRUE)
+
+n = nrow(filtered_df2)
+ATT_PSS_boot = c()
+set.seed(101)
+# bootstrapping to find standard error
+for(i in 1:100) {
+  filtered_boot = filtered_df2[sample(1:n, n, replace = TRUE), ]
+  mod_ps_boot = glm(CMV_status ~ age + sex + race + educ + smoke_stat + INFLAM_5 + comorb_idx + Tcells,
+                 data = filtered_boot, family = "binomial")
+  
+  ps_boot = predict(mod_ps_boot, type = "response")
+  
+  # ps score stratification
+  ps_quintile_boot = cut(ps_boot, breaks = c(0, quantile(ps_boot[filtered_boot$CMV_status == 1], p = c(0.2, 0.4, 0.6, 0.8)), 1), labels = 1:5)
+
+  # finding TE of the treated for each quintile
+  te_quintile = tapply(filtered_boot$CD4N_pct[filtered_boot$CMV_status == 1],
+                        ps_quintile_boot[filtered_boot$CMV_status == 1], mean) -  
+                 tapply(filtered_boot$CD4N_pct[filtered_boot$CMV_status == 0],
+                        ps_quintile_boot[filtered_boot$CMV_status == 0], mean)
+  
+  # finding overall ATT based on ps score stratification
+  nA_boot = nrow(filtered_boot[filtered_boot$CMV_status == 1, ])
+  nAj_boot = table(ps_quintile_boot[filtered_boot$CMV_status == 1])
+  
+  ATT_boot = sum(te_quintile * nAj_boot / nA_boot, na.rm = TRUE)
+  
+  ATT_PSS_boot = c(ATE_PSS_boot, ATT_boot)
+}
+
+SE_ATT = sd(ATT_PSS_boot)
+CI_ATT_PSS = ATT_PSS + c(-1, 1) * qnorm(0.975) * SE_ATT
+
+result_2_1 = data.frame(
+  Variable=c("ATT","SE","lower_CI", "upper_CI"),
+  Values = c(ATT_PSS, SE_ATT, CI_ATT_PSS[1], CI_ATT_PSS[2])
+)
+
+kable(result_2_1, caption = "Estimate of ATT using PSS")
+```
+
+<br>
+<br>
+
+#### **Estimating the ATE and ATT using IPW**
+
+```{r}
+# Set seed for reproducibility
+set.seed(101)
+
+# trimming extreme ps values
+ps = pmin(pmax(filtered_df2$ps, 0.01), 0.99)
+
+# calculate stabilized weights
+p_treated = mean(filtered_df2$CMV_status)
+w = ifelse(filtered_df2$CMV_status == 1,
+            p_treated / ps,
+            (1 - p_treated) / (1 - ps))
+
+# compute IPW ATE
+Y1 = filtered_df2$CD4N_pct[filtered_df2$CMV_status == 1]
+Y0 = filtered_df2$CD4N_pct[filtered_df2$CMV_status == 0]
+w1 = w[filtered_df2$CMV_status == 1]
+w0 = w[filtered_df2$CMV_status == 0]
+
+ATE_ipw = weighted.mean(Y1, w1, na.rm = TRUE) - 
+           weighted.mean(Y0, w0, na.rm = TRUE)
+
+# bootstrapping to find standard error
+n = nrow(filtered_df2)
+n_boot = 100
+ATE_ipw_boot = numeric(n_boot)
+
+for (i in 1:n_boot) {
+  idx = sample(1:n, n, replace = TRUE)
+  boot_df = filtered_df2[idx, ]
+  
+  mod_boot = glm(CMV_status ~ age + sex + race + educ + smoke_stat + INFLAM_5 + comorb_idx + Tcells,
+                  data = boot_df, family = "binomial")
+  ps_boot = predict(mod_boot, type = "response")
+  ps_boot = pmin(pmax(ps_boot, 0.01), 0.99)
+  
+  # calculate stabilized weights
+  p_treat_boot = mean(boot_df$CMV_status)
+  w_boot = ifelse(boot_df$CMV_status == 1,
+                   p_treat_boot / ps_boot,
+                   (1 - p_treat_boot) / (1 - ps_boot))
+  
+  Y1b = boot_df$CD4N_pct[boot_df$CMV_status == 1]
+  Y0b = boot_df$CD4N_pct[boot_df$CMV_status == 0]
+  w1b = w_boot[boot_df$CMV_status == 1]
+  w0b = w_boot[boot_df$CMV_status == 0]
+  
+  ATE_boot = weighted.mean(Y1b, w1b, na.rm = TRUE) - 
+              weighted.mean(Y0b, w0b, na.rm = TRUE)
+  ATE_ipw_boot[i] = ATE_boot
+}
+
+SE_ATE_ipw = sd(ATE_ipw_boot)
+CI_ATE_ipw = ATE_ipw + c(-1, 1) * qnorm(0.975) * SE_ATE_ipw
+
+result3 = data.frame(
+  Estimate = c("ATE", "SE", "Lower CI", "Upper CI"),
+  Value = round(c(ATE_ipw, SE_ATE_ipw, CI_ATE_ipw), 4)
+)
+
+kable(result3, caption = "ATE Estimate using IPW")
+```
+
+
+```{r}
+# calculating ATT weights
+w_att = ifelse(filtered_df2$CMV_status == 1, 1, ps / (1 - ps))
+
+# computing IPW ATT
+Y1 = filtered_df2$CD4N_pct[filtered_df2$CMV_status == 1]
+Y0 = filtered_df2$CD4N_pct[filtered_df2$CMV_status == 0]
+w0 = w_att[filtered_df2$CMV_status == 0]
+
+ATT_ipw = mean(Y1, na.rm = TRUE) - weighted.mean(Y0, w0, na.rm = TRUE)
+
+# bootstrapping to find standard error
+n = nrow(filtered_df2)
+n_boot = 100
+ATT_ipw_boot = numeric(n_boot)
+
+for (i in 1:n_boot) {
+  idx = sample(1:n, n, replace = TRUE)
+  boot_df = filtered_df2[idx, ]
+  
+  mod_boot = glm(CMV_status ~ age + sex + race + educ + smoke_stat + INFLAM_5 + comorb_idx + Tcells,
+                  data = boot_df, family = "binomial")
+  ps_boot = predict(mod_boot, type = "response")
+  ps_boot = pmin(pmax(ps_boot, 0.01), 0.99)
+  
+  w_att_boot = ifelse(boot_df$CMV_status == 1,
+                       1,
+                       ps_boot / (1 - ps_boot))
+  
+  Y1b = boot_df$CD4N_pct[boot_df$CMV_status == 1]
+  Y0b = boot_df$CD4N_pct[boot_df$CMV_status == 0]
+  w0b = w_att_boot[boot_df$CMV_status == 0]
+  
+  ATT_boot = mean(Y1b, na.rm = TRUE) - weighted.mean(Y0b, w0b, na.rm = TRUE)
+  ATT_ipw_boot[i] = ATT_boot
+}
+
+SE_ATT_ipw = sd(ATT_ipw_boot)
+CI_ATT_ipw = ATT_ipw + c(-1, 1) * qnorm(0.975) * SE_ATT_ipw
+
+result3_1 = data.frame(
+  Estimate = c("ATT", "SE", "Lower CI", "Upper CI"),
+  Value = round(c(ATT_ipw, SE_ATT_ipw, CI_ATT_ipw), 4)
+)
+
+kable(result3_1, caption = "ATT Estimate using IPW")
+```
+
+<br>
+<br>
+
+
+#### **Performing 1:1 nearest neighbor propensity score matching**
+
+**Finding the standardized mean difference among the matched cohort.**
+
+```{r}
+# 1 to 1 matching
+mod_match_1_1 = matchit(1-CMV_status ~ age + sex + race + educ + smoke_stat + INFLAM_5 + comorb_idx + Tcells, 
+                        distance="logit", 
+                        method="nearest", 
+                        data=filtered_df2, 
+                        ratio=1, 
+                        replace=TRUE)
+
+match_pairs = na.omit(mod_match_1_1$match.matrix)  # to check if controls re used or not
+num_match = nrow(match_pairs)
+cat("No of matched rows:", num_match) 
+
+# creating the matched dataframe
+matched_df = data.frame(rbind(filtered_df2[filtered_df2$CMV_status == 0, ],
+	            filtered_df2[as.numeric(mod_match_1_1$match.matrix), ]))
+
+# setting variable names for TableOne
+matched_df = labelled::set_variable_labels(matched_df,
+                                      age = "Age at 2016",
+                                      sex = "Biological Sex",
+                                      race = "Racial Group",
+                                      educ = "Education Level",
+                                      smoke_stat = "Smoking Status",
+                                      mortality = "Mortality",
+                                      TRAB = "T alpha-beta clones",
+                                      Tcells = "T cells count",
+                                      CD4N_pct = "Naive Helper T cells pct",
+                                      INFLAM_5 = "Total Inflammation Score",
+                                      comorb_idx = "# of comorbidities"
+                                      )
+
+# # creating a table one stratified by treatment group
+# cat_cols = c('sex', 'race', 'mortality', 'smoke_stat')
+# num_cols = c('age', 'educ', 'BMI', 'INFLAM_5', 'comorb_idx', 'Tcells', 'CD4N_pct', 'CD4N_pct')
+# all_cols = c(cat_cols, num_cols)
+# 
+# table3 = CreateTableOne(data = matched_df, vars=all_cols, factorVars = cat_cols, strata = "CMV_status", test=FALSE)
+# table3 = print(table3, nonnormal=num_cols, varLabels = TRUE, smd=TRUE)
+```
+
+```{r, echo=FALSE, eval=TRUE, include=TRUE, warning=FALSE, message = FALSE, results='hold', cache=TRUE}
+# kable(table3, caption = "**Participant Characteristics after Matching**", align = "c")
+```
+
+<br>
+
+**Propensity score model with the matched data**
+
+```{r}
+# calculating propensity scores and IPW
+mod_match_ps = glm(CMV_status ~ age + sex + race + educ + smoke_stat + INFLAM_5 + comorb_idx + Tcells, family = binomial(), data = matched_df)
+
+matched_df$ps = predict(mod_match_ps, type = "response")
+matched_df$weight = matched_df$CMV_status/ matched_df$ps + (1 - matched_df$CMV_status)/(1 - matched_df$ps)
+
+# # creating weighted survey data and computing SMD
+# svy_data = svydesign(ids=~1, data=matched_df, weights=~weight)
+
+# # creating a table one stratified by treatment group
+# cat_cols = c('sex', 'race', 'mortality', 'smoke_stat')
+# num_cols = c('age', 'educ', 'BMI', 'INFLAM_5', 'comorb_idx', 'Tcells', 'TRAB', 'CD4N_pct')
+# all_cols = c(cat_cols, num_cols)
+# svy_table_one = svyCreateTableOne(vars = all_cols, factorVars = cat_cols, strata = "CMV_status", data=svy_data, test = FALSE)
+# 
+# table4 = print(svy_table_one, nonnormal=num_cols, showAllLevels=FALSE, varLabels = TRUE, smd=TRUE)
+```
+
+```{r, eval=TRUE, echo=TRUE, warning=FALSE, message=FALSE, comment=NA, results='hold'}
+# kable(table4, caption = "**Participant characteristics stratified by IPW**", align = "c")
+
+```
+
+
+**Estimating the ATE and ATT using propensity score stratification**
+
+```{r}
+### For average treatment effect (ATE)
+# ps score stratification
+ps_quintile = cut(matched_df$ps, breaks = quantile(matched_df$ps, probs = seq(0, 1, by = 0.2)), include.lowest = TRUE, labels = FALSE)
+
+# finding TE for each quintile
+te_quintile = tapply(matched_df$CD4N_pct[matched_df$CMV_status == 1],
+                      ps_quintile[matched_df$CMV_status == 1], mean) -  
+               tapply(matched_df$CD4N_pct[matched_df$CMV_status == 0],
+                      ps_quintile[matched_df$CMV_status == 0], mean)
+
+# finding overall ATE based on ps score stratification
+ATE_PSS = sum(te_quintile * table(ps_quintile) / nrow(matched_df), na.rm = TRUE)
+
+n = nrow(matched_df)
+ATE_PSS_boot = c()
+set.seed(101)
+# bootstrapping to find standard error
+for(i in 1:100) {
+  matched_boot = matched_df[sample(1:n, n, replace = TRUE), ]
+  mod_ps_boot = glm(CMV_status ~ age + sex + race + educ + smoke_stat + INFLAM_5 + comorb_idx + Tcells,
+                 data = matched_boot, family = "binomial")
+  
+  ps_boot = predict(mod_ps_boot, type = "response")
+  
+  # ps score stratification
+  ps_quintile_boot = cut(ps_boot, breaks = quantile(ps_boot, probs = seq(0, 1, by = 0.2), na.rm = TRUE), include.lowest = TRUE, labels = FALSE)
+  
+  # finding TE for each quintile
+  te_quintile_boot = tapply(matched_boot$CD4N_pct[matched_boot$CMV_status == 1],
+                             ps_quintile_boot[matched_boot$CMV_status == 1], mean) -
+                     tapply(matched_boot$CD4N_pct[matched_boot$CMV_status == 0],
+                             ps_quintile_boot[matched_boot$CMV_status == 0], mean)
+  
+  # finding overall ATE based on ps score stratification
+  ATE_boot = sum(te_quintile_boot * table(ps_quintile_boot)/ n, na.rm = TRUE)
+  
+  ATE_PSS_boot <- c(ATE_PSS_boot, ATE_boot)
+}
+
+SE_ATE = sd(ATE_PSS_boot)
+CI_ATE_PSS = ATE_PSS + c(-1, 1) * qnorm(0.975) * SE_ATE
+
+result_4 = data.frame(
+  Variable=c("ATE","SE","lower_CI", "upper_CI"),
+  Values = c(ATE_PSS, SE_ATE, CI_ATE_PSS[1], CI_ATE_PSS[2])
+)
+
+kable(result_4, caption = "Estimate of ATE using PSS")
+```
+
+
+```{r}
+### For average treatment effect among the treated (ATT)
+# ps score stratification
+ps_quintile = cut(matched_df$ps, breaks = c(0, quantile(matched_df$ps[matched_df$CMV_status == 1], p = c(0.2, 0.4, 0.6, 0.8)), 1), labels = 1:5)
+
+# finding TE of the treated for each quintile
+te_quintile = tapply(matched_df$CD4N_pct[matched_df$CMV_status == 1],
+                      ps_quintile[matched_df$CMV_status == 1], mean) -  
+               tapply(matched_df$CD4N_pct[matched_df$CMV_status == 0],
+                      ps_quintile[matched_df$CMV_status == 0], mean)
+
+# finding overall ATT based on ps score stratification
+nA = nrow(filtered_df[matched_df$CMV_status == 1, ])
+nAj = table(ps_quintile[matched_df$CMV_status == 1])
+
+ATT_PSS = sum(te_quintile * nAj / nA, na.rm = TRUE)
+
+n = nrow(matched_df)
+ATT_PSS_boot = c()
+set.seed(101)
+# bootstrapping to find standard error
+for(i in 1:100) {
+  matched_boot = matched_df[sample(1:n, n, replace = TRUE), ]
+  mod_ps_boot = glm(CMV_status ~ age + sex + race + educ + smoke_stat + INFLAM_5 + comorb_idx + Tcells,
+                 data = matched_boot, family = "binomial")
+  
+  ps_boot = predict(mod_ps_boot, type = "response")
+  
+  # ps score stratification
+  ps_quintile_boot = cut(ps_boot, breaks = c(0, quantile(ps_boot[matched_boot$CMV_status == 1], p = c(0.2, 0.4, 0.6, 0.8)), 1), labels = 1:5)
+
+  # finding TE of the treated for each quintile
+  te_quintile = tapply(matched_boot$CD4N_pct[matched_boot$CMV_status == 1],
+                        ps_quintile_boot[matched_boot$CMV_status == 1], mean) -  
+                 tapply(matched_boot$CD4N_pct[matched_boot$CMV_status == 0],
+                        ps_quintile_boot[matched_boot$CMV_status == 0], mean)
+  
+  # finding overall ATT based on ps score stratification
+  nA_boot = nrow(matched_boot[matched_boot$CMV_status == 1, ])
+  nAj_boot = table(ps_quintile_boot[matched_boot$CMV_status == 1])
+  
+  ATT_boot = sum(te_quintile * nAj_boot / nA_boot, na.rm = TRUE)
+  
+  ATT_PSS_boot = c(ATE_PSS_boot, ATT_boot)
+}
+
+SE_ATT = sd(ATT_PSS_boot)
+CI_ATT_PSS = ATT_PSS + c(-1, 1) * qnorm(0.975) * SE_ATT
+
+result_4_1 = data.frame(
+  Variable=c("ATT","SE","lower_CI", "upper_CI"),
+  Values = c(ATT_PSS, SE_ATT, CI_ATT_PSS[1], CI_ATT_PSS[2])
+)
+
+kable(result_4_1, caption = "Estimate of ATT using PSS")
+```
+
+<br>
+<br>
+
+
+
+

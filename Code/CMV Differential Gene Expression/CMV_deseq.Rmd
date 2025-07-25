@@ -1,0 +1,220 @@
+---
+title: "CMV significant dataset"
+author: "Gokul Seshadri"
+date: "2025-04-03"
+output: html_document
+---
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+library(data.table)
+library(dplyr)
+library(tibble)
+library(broom)
+library(vroom)
+library(glue)
+library(stats)
+library(edgeR)
+library(DESeq2)
+```
+
+### 1) Fetching the datasets
+
+#### Reading the clinical dataset
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE, results='hold'}
+# Reading the clinical dataset from thygara folder
+clinical_df = vroom("/users/1/sesha059/Plan B/New/CMV_clonotypes_data.csv")
+dim(clinical_df)
+```
+
+#### Reading the RNAseq data
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE, results='hold'}
+# Reading the RNAseq data from thygara folder
+gene_exp_df = vroom("/panfs/jay/groups/21/thyagara/sesha059/HRS/RNASeq/Final Datasets/Including Flag/HRS_RNASeq_rawcounts_20250304.csv")
+gene_exp_df = gene_exp_df[grep("^ENSG", gene_exp_df$gene_id), ] # excluding the intergenic flag
+
+#colnames(gene_exp_df) <- sub("_.*", "", colnames(gene_exp_df))
+
+# Converting the 'gene_id' column into row names
+rownames(gene_exp_df) = NULL
+gene_exp_df = column_to_rownames(gene_exp_df, var = "gene_id")
+
+dge = DGEList(counts = gene_exp_df)
+cpm_values = cpm(dge)
+# selecting only those genes with mean count per million greater than 3
+mean_cpm = rowMeans(cpm_values)
+gene_exp_df = gene_exp_df[mean_cpm > 3, ]
+
+# # filtering threshold: CPM > 1 in at least 20% of samples
+# keep_genes = rowSums(cpm_values > 1) >= (0.2 * ncol(gene_exp_df))
+# gene_exp_df = gene_exp_df[keep_genes, ]
+
+dim(gene_exp_df)
+```
+
+#### Making the datasets compatible for differential gene expression analysis
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE, results='hold'}
+# type conversions
+clinical_df = clinical_df %>%
+  mutate(
+    CMV_status = factor(CMV_status, levels = c("Negative", "Positive")),
+    sex = factor(sex, levels = c(1, 2)),
+    race = factor(race, levels = c("Non-Hispanic White", "Hispanic", "Non-Hispanic Black", "Non-Hispanic Other")),
+    smoke_stat = factor(smoke_stat, levels = c("Never smokers", "Former smokers", "Current smokers"))
+  )
+
+# fetching only those rows from the gene expression data
+clinical_df2 = clinical_df %>%
+  filter(`Lab_ID` %in% colnames(gene_exp_df))
+
+# Convert the 'Lab ID' column into row names
+clinical_df2 <- column_to_rownames(clinical_df2, var = "Lab_ID")
+
+print(dim(clinical_df2))
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE, results='hold'}
+gene_exp_df = gene_exp_df[, c(rownames(clinical_df2))]
+
+dim(gene_exp_df)
+```
+
+### 2) Differnetial Gene Expression Analysis
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE, results='hold'}
+# Creating the DESeq object
+dds = DESeqDataSetFromMatrix(countData=gene_exp_df, 
+                              colData=clinical_df2, 
+                              design=~age + sex + race + educ + smoke_stat + lymp + BMI + comorb_idx + INFLAM_5 + CMV_status)
+
+# Running the differential gene expression analysis
+dds = DESeq(dds)
+
+# Saving the results in tidy format
+deseq_res = results(dds, tidy = TRUE)
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE, results='hold'}
+deseq_res_sig = deseq_res %>%
+                  filter(padj < 0.05)
+
+write.csv(deseq_res_sig, "/users/1/sesha059/Plan B/New/Deseq_CMV_sig_cpm3.csv", row.names = FALSE)
+```
+
+
+```{r}
+sum(deseq_res$padj < 0.1, na.rm=TRUE)
+```
+
+```{r}
+#reset par
+par(mfrow=c(1,1))
+# Make a basic volcano plot
+with(deseq_res, plot(log2FoldChange, -log10(pvalue), pch=20, main="Volcano plot for CMV differential expression", xlim=c(-3,3)))
+
+# Add colored points: blue if padj<0.01, red if log2FC>1 and padj<0.05)
+with(subset(deseq_res, padj<.05 ), points(log2FoldChange, -log10(pvalue), pch=20, col="blue"))
+
+#with(subset(CMV_sig_genes, padj<.05 & abs(log2FoldChange)>0.5), points(log2FoldChange, -log10(pvalue), pch=20, col="green"))
+
+with(subset(deseq_res, padj<.05 & abs(log2FoldChange)>0.5), points(log2FoldChange, -log10(pvalue), pch=20, col="red"))
+```
+
+## Creating the raw and log2cpm transformed study datasets based on CMV significant genes
+
+### 0) CMV differentially expressed genes
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE, results='hold'}
+# CMV results
+CMV_sig_genes = vroom("/users/1/sesha059/Plan B/New/Deseq_CMV_sig_cpm3.csv")
+
+dim(CMV_sig_genes)
+```
+
+<br>
+
+
+### 1) Creating the raw RNASeq study dataset
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE, results='hold'}
+# Transposing the gene exp dataset and convert to a tibble
+transposed_df = gene_exp_df %>%
+  t() %>%                        
+  as.data.frame() %>%            
+  rownames_to_column("Lab_ID")
+
+transposed_df = transposed_df[, c('Lab_ID', CMV_sig_genes$row)]
+
+# Creating the combined dataset for downstream use
+merged_data_raw = clinical_df2 %>%            
+  rownames_to_column("Lab_ID") %>%
+  inner_join(transposed_df, by = "Lab_ID")
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE, results='hold'}
+write.csv(merged_data_raw, "/users/1/sesha059/Plan B/New/CMV_sig_data_raw.csv", row.names = FALSE)
+```
+
+
+### 2) Creating the log2cpm transformed RNASeq study dataset
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE, results='hold'}
+# Reading the RNAseq data from thygara folder
+gene_exp_df2 = vroom("/panfs/jay/groups/21/thyagara/sesha059/HRS/RNASeq/Final Datasets/Including Flag/HRS_RNASeq_log2cpm_20250304.csv")
+gene_exp_df2 = gene_exp_df2[grep("^ENSG", gene_exp_df2$gene_id), ] # excluding the intergenic flag
+
+#colnames(gene_exp_df) <- sub("_.*", "", colnames(gene_exp_df))
+
+# Converting the 'gene_id' column into row names
+rownames(gene_exp_df2) = NULL
+gene_exp_df2 = column_to_rownames(gene_exp_df2, var = "gene_id")
+
+dim(gene_exp_df2)
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE, results='hold'}
+gene_exp_df2 = gene_exp_df2[, c(rownames(clinical_df2))]
+
+dim(gene_exp_df2)
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE, results='hold'}
+# Transposing the gene exp dataset and convert to a tibble
+transposed_df = gene_exp_df2 %>%
+  t() %>%                        
+  as.data.frame() %>%            
+  rownames_to_column("Lab_ID")
+
+transposed_df = transposed_df[, c('Lab_ID', CMV_sig_genes$row)]
+
+# Creating the combined dataset for downstream use
+merged_data_log2cpm = clinical_df2 %>%            
+  rownames_to_column("Lab_ID") %>%
+  inner_join(transposed_df, by = "Lab_ID")
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE, results='hold'}
+write.csv(merged_data_log2cpm, "/users/1/sesha059/Plan B/New/CMV_sig_data_log2cpm.csv", row.names = FALSE)
+```
+
+
+### 3) Creating a volcano plot for CMV differential expression (for quick generation)
+
+```{r}
+CMV_sig_genes = vroom("/users/1/sesha059/Plan B/New/Deseq_CMV_sig_cpm3.csv")
+```
+
+```{r}
+#reset par
+par(mfrow=c(1,1))
+# Make a basic volcano plot
+with(deseq_res, plot(log2FoldChange, -log10(pvalue), pch=20, main="Volcano plot for CMV differential expression", xlim=c(-3,3)))
+
+# Add colored points: blue if padj<0.05, red if log2FC>1 and padj<0.05)
+with(subset(deseq_res, padj<.05 ), points(log2FoldChange, -log10(pvalue), pch=20, col="blue"))
+#with(subset(CMV_sig_genes, padj<.05 & abs(log2FoldChange)>0.5), points(log2FoldChange, -log10(pvalue), pch=20, col="green"))
+with(subset(deseq_res, padj<.05 & abs(log2FoldChange)>0.5), points(log2FoldChange, -log10(pvalue), pch=20, col="red"))
+```
+

@@ -1,0 +1,574 @@
+---
+ title: "Finding Coexpression Modules"
+author: "Gokul Seshadri"
+date: "2025-04-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Importing the necessary libraries
+
+```{r}
+library(tibble)
+library(dplyr)
+library(ggplot2)
+library(pheatmap)
+library(WGCNA)
+library(glue)
+library(reshape2)
+library(enrichR)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(ReactomePA)
+
+enableWGCNAThreads(nThreads = 8)
+```
+
+### Loading the dataset having CMV significant genes
+
+```{r}
+log2cpm_df = read.csv("D:/RA/GitHub/Plan-B/Datasets/Final Datasets/CMV_sig_data_log2cpm.csv")
+
+# selecting only the CMV significant genes
+only_genes_df = log2cpm_df[, grep("^ENSG", names(log2cpm_df))]
+rownames(only_genes_df) = log2cpm_df$Lab_ID
+rm(log2cpm_df)
+
+dim(only_genes_df)
+```
+
+<br>
+
+### Sample clustering and removing outlier samples
+```{r}
+#Group data in a dendogram to check outliers
+sampleTree = hclust(dist(only_genes_df), method = "average")
+```
+
+```{r}
+par(cex = 0.6)
+plot(sampleTree, main = "Sample clustering to detect outliers", sub="", xlab="", cex.lab = 1.5, 
+     cex.axis = 1.5, cex.main = 2)
+
+#Plot a line showing the cut-off
+abline(h = 100, col = "red")
+```
+
+```{r}
+#Determine clusters below the line
+clust = cutreeStatic(sampleTree, cutHeight = 100, minSize = 10)
+
+#Cluster 1 contains the samples we want to keep.
+keepSamples = (clust==1)
+only_genes_df2 = only_genes_df[keepSamples, ]
+
+nGenes = ncol(only_genes_df2)
+nSamples = nrow(only_genes_df2)
+
+# after filteration based on Tree height
+# only_genes_df = only_genes_df[-31, ] # F1652275 index sample was outlier
+dim(only_genes_df2)
+```
+
+<br>
+
+#### Filtering out low-variance genes before running WGCNA
+```{r}
+keepGenes <- apply(only_genes_df2, 2, var) > quantile(apply(only_genes_df2, 2, var), 0.25)
+only_genes_filtered <- only_genes_df2[, keepGenes]
+
+dim(only_genes_filtered)
+```
+
+
+### Adding the clinical data
+```{r}
+clinical_df = read.csv("D:/RA/GitHub/Plan-B/Datasets/Final Datasets/CMV_clonotypes_lv.csv")
+clinical_df = clinical_df[, c('Lab_ID', 'CD4N', 'TRAB', 'age')] %>%
+                column_to_rownames("Lab_ID")
+
+clinical_df = clinical_df[keepSamples, ]
+dim(clinical_df)
+```
+
+<br>
+
+### Network construction
+```{r}
+# allowWGCNAThreads()
+
+orig_cor <- cor       
+cor <- WGCNA::cor
+
+# Choose a set of soft-thresholding powers
+powers = c(c(1:10), seq(from = 12, to = 20, by = 2))
+
+# Call the network topology analysis function
+sft = pickSoftThreshold(
+  only_genes_filtered,             
+  #blockSize = 30,
+  corFnc = cor,
+  powerVector = powers,
+  verbose = 5
+  )
+
+par(mfrow = c(1,2));
+cex1 = 0.9;
+
+# Scale-free topology fit index as a function of the soft-thresholding power
+plot(sft$fitIndices[, 1],
+     -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2],
+     xlab = "Soft Threshold (power)",
+     ylab = "Scale Free Topology Model Fit, signed R^2",
+     main = paste("Scale independence")
+)
+text(sft$fitIndices[, 1],
+     -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2],
+     labels = powers, cex = cex1, col = "red"
+)
+abline(h = 0.90, col = "red")
+
+# Mean connectivity as a function of the soft-thresholding power
+plot(sft$fitIndices[, 1],
+     sft$fitIndices[, 5],
+     xlab = "Soft Threshold (power)",
+     ylab = "Mean Connectivity",
+     type = "n",
+     main = paste("Mean connectivity")
+)
+text(sft$fitIndices[, 1],
+     sft$fitIndices[, 5],
+     labels = powers,
+     cex = cex1, col = "red")
+```
+
+
+```{r}
+enableWGCNAThreads(nThreads = 12)
+
+softPower = 8;
+adjacency = adjacency(only_genes_filtered, power = softPower)
+
+# Turn adjacency into topological overlap
+TOM = TOMsimilarity(adjacency)
+
+# Finding TOM dissimilarity
+dissTOM = 1-TOM
+```
+
+#### Hclust with TOM based dissimilarity
+```{r}
+geneTree = hclust(as.dist(dissTOM), method = "average")
+
+# Plot the resulting clustering tree (dendrogram)
+plot(geneTree, xlab="", sub="", main = "Gene clustering on TOM-based dissimilarity",
+     labels = FALSE, hang = 0.04)
+```
+
+#### Partition genes with similar expression into modules
+```{r}
+# We like large modules, so we set the minimum module size relatively high:
+minModuleSize = 100;
+# Module identification using dynamic tree cut:
+dynamicMods = cutreeDynamic(dendro = geneTree, distM = dissTOM,
+                deepSplit = 2, pamRespectsDendro = FALSE,
+                minClusterSize = minModuleSize);
+
+table(dynamicMods)
+```
+
+```{r}
+dynamicColors = labels2colors(dynamicMods)
+
+# Plot the dendrogram and colors underneath
+plotDendroAndColors(geneTree, dynamicColors, "Dynamic Tree Cut",
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05,
+                    main = "Gene dendrogram and module colors")
+```
+
+
+#### Cluster and merge modules based on eigen genes
+
+```{r}
+# Calculate eigengenes
+MEList = moduleEigengenes(only_genes_filtered, colors = dynamicColors)
+MEs = MEList$eigengenes
+# Calculate dissimilarity of module eigengenes
+MEDiss = 1-cor(MEs);
+# Cluster module eigengenes
+METree = hclust(as.dist(MEDiss), method = "average");
+```
+
+```{r}
+# Plot the result
+plot(METree, main = "Clustering of module eigengenes",
+     xlab = "", sub = "")
+MEDissThres = 0.2
+# Plot the cut line into the dendrogram
+abline(h=MEDissThres, col = "red")
+```
+
+```{r}
+# Call an automatic merging function
+merge = mergeCloseModules(only_genes_filtered, dynamicColors, cutHeight = MEDissThres, verbose = 3)
+```
+
+```{r}
+# The merged module colors
+mergedColors = merge$colors;
+# Eigengenes of the new merged modules:
+mergedMEs = merge$newMEs;
+
+#pdf(file = "Plots/geneDendro-3.pdf", wi = 9, he = 6)
+plotDendroAndColors(geneTree, cbind(dynamicColors, mergedColors),
+                    c("Dynamic Tree Cut", "Merged dynamic"),
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05)
+```
+
+```{r}
+table(mergedColors)
+```
+
+```{r}
+# Rename to moduleColors
+moduleColors = mergedColors
+
+# Construct numerical labels corresponding to the colors
+colorOrder = c("grey", standardColors(50));
+moduleLabels = match(moduleColors, colorOrder)-1;
+MEs = mergedMEs;
+
+# Save module colors and labels for use in subsequent parts
+# save(MEs, moduleLabels, moduleColors, geneTree, file = "D:/MS/My Research/Plan B/Code/Coexpression Analysis/cpm3/cpm3_netCon_stepByStep.RData")
+```
+
+#### saving modular info in a csv file
+```{r}
+# creating a dataframe to store module information
+coexp_modules = data.frame(gene_id = names(only_genes_filtered), mod_num = moduleLabels, mod_color = moduleColors)
+coexp_modules$gene_id = sub("\\..*$", "", coexp_modules$gene_id)
+coexp_modules
+```
+
+```{r}
+write.csv(coexp_modules, 'D:/RA/GitHub/Plan-B/Code/Coexpression Analysis/coexp_modules.csv', row.names = FALSE)
+```
+
+### Study Relationships between modules and traits
+```{r}
+# Define numbers of genes and samples
+nGenes = ncol(only_genes_filtered);
+nSamples = nrow(only_genes_filtered);
+
+# Recalculate MEs with color labels
+MEs0 = moduleEigengenes(only_genes_filtered, moduleColors)$eigengenes
+MEs = orderMEs(MEs0)
+moduleTraitCor = cor(MEs, clinical_df, use = "p");
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nSamples);
+
+
+# Will display correlations. For space reasons, we will not display the p values of the correlations. 
+textMatrix =  signif(moduleTraitCor, 2)
+textMatrix = formatC(moduleTraitCor, digits = 2, format = "f")
+
+dim(textMatrix) = dim(moduleTraitCor)
+
+# Display the correlation values within a heatmap plot
+labeledHeatmap(Matrix = moduleTraitCor,
+               xLabels = names(clinical_df),
+               yLabels = names(MEs),
+               ySymbols = NULL,
+               colorLabels = FALSE,
+               colors = blueWhiteRed(50),
+               textMatrix = textMatrix,
+               setStdMargins = FALSE,
+               cex.text = 1,
+               zlim = c(-1,1), 
+               main = paste("Gene Expression Module- Trait relationships"), ylab = "Gene Expression-Based Modules")
+```
+
+
+### Saving the results in Cytoscape format
+```{r}
+# saving info about the undirected edges
+nTopEdges = floor(length(TOM) * 0.05)
+
+edges = data.frame(
+  from = rep(coexp_modules$gene_id, each = length(coexp_modules$gene_id)),
+  to = rep(coexp_modules$gene_id, times = length(coexp_modules$gene_id)),
+  weight = as.vector(TOM)
+)
+edges = edges[edges$from != edges$to, ]
+edges = edges[order(-edges$weight), ][1:nTopEdges, ]
+
+write.table(edges, file = "D:/RA/GitHub/Plan-B/Code/Coexpression Analysis/all_modules_edges.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+
+# saving info about the nodes
+nodeAttr = data.frame(
+  id = coexp_modules$gene_id,
+  moduleColor = coexp_modules$mod_color,  # from WGCNA output
+  stringsAsFactors = FALSE
+)
+write.table(nodeAttr, file = "D:/RA/GitHub/Plan-B/Code/Coexpression Analysis/all_modules_nodes.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+### Creating dataset for downstream analysis
+```{r}
+### Gene Expression data
+log2cpm_df = read.csv("D:/MS/My Research/Plan B/Datasets/Final Datasets/CMV_sig_data_log2cpm.csv")
+names(log2cpm_df) = sub("\\..*$", "", names(log2cpm_df))
+
+# selecting only gene related columns
+log2cpm_df = log2cpm_df[, c("Lab_ID", coexp_modules$gene_id)]
+
+### Data with latent variable info
+clinical_lv = read.csv("D:/MS/My Research/Plan B/Datasets/Final Datasets/CMV_clonotypes_lv.csv")
+
+### Combining the two
+latent_mod_data = inner_join(clinical_lv, log2cpm_df, by = "Lab_ID")
+latent_mod_data = latent_mod_data[keepSamples, ]
+dim(latent_mod_data)
+```
+
+```{r}
+write.csv(latent_mod_data, "D:/RA/GitHub/Plan-B/Datasets/Final Datasets/final_dataset.csv", row.names = FALSE)
+```
+
+
+### My previous Method
+Forming modules,
+```{r}
+enableWGCNAThreads(nThreads = 12)
+
+picked_power = 8
+
+netwk <- blockwiseModules(only_genes_filtered,                
+
+                          # == Adjacency Function ==
+                          power = picked_power,
+                          TOMType = "unsigned",
+                          networkType = "unsigned",
+
+                          # == Tree and Block Options ==
+                          deepSplit = 2,
+                          pamRespectsDendro = T,
+                          minModuleSize = 30,
+                          maxBlockSize = 10000,
+                          
+                          # == Module Adjustments ==
+                          reassignThreshold = 0,
+                          mergeCutHeight = 0.25,
+                          
+                          # == TOM == Archive the run results in TOM file (saves time)
+                          saveTOMs = T,
+                          saveTOMFileBase = "SpodopteraTOM-blockwise",
+                          
+                          # == Output Options
+                          numericLabels = T,
+                          verbose = 3)
+```
+
+```{r}
+# Convert labels to colors for plotting
+mergedColors = labels2colors(netwk$colors)
+names(mergedColors) = names(netwk$colors)
+  
+# Plot the dendrogram and the module colors underneath
+plotDendroAndColors(
+  netwk$dendrograms[[1]],
+  mergedColors[netwk$blockGenes[[1]]],
+  "Module colors",
+  dendroLabels = FALSE,
+  hang = 0.03,
+  addGuide = TRUE,
+  guideHang = 0.05 )
+```
+
+```{r}
+# creating a dataframe to store module information
+coexp_modules = as.data.frame(netwk$colors) %>%
+                  rownames_to_column("gene_id") %>%
+                  dplyr::rename(modules = "netwk$colors")
+#coexp_modules$gene_id = sub("\\..", "", coexp_modules$gene_id)
+coexp_modules$colors = labels2colors(coexp_modules$modules)
+coexp_modules
+```
+
+```{r}
+write.csv(coexp_modules, 'D:/MS/My Research/Plan B/Code/Coexpression Analysis/coexp_modules.csv', row.names = FALSE)
+```
+
+### Pathway Enrichment Analysis for WGCNA modules
+
+```{r}
+# Creating a list of modules
+modules = unique(coexp_modules$mod_color)  # Get unique module colors
+
+moduleGenes = lapply(modules, function(module) {
+   coexp_modules$gene_id[coexp_modules$mod_color == module] # Get genes in each module
+})
+
+names(moduleGenes) = modules  # Assign module colors as names
+
+
+# modules = unique(mergedColors)  # Get unique module colors
+# 
+# moduleGenes = lapply(modules, function(module) {
+#   sub("\\..", "", names(mergedColors)[mergedColors == module])  # Get genes in each module
+# })
+# 
+# names(moduleGenes) = modules  # Assign module colors as names
+```
+
+
+```{r}
+# Converting ENSEMBL ids to ENTREZIDs
+convertToEntrez <- function(genes) {
+  mappedIDs = mapIds(org.Hs.eg.db, keys=genes, column="ENTREZID", keytype="ENSEMBL", multiVals="first")
+  return(na.omit(mappedIDs))  # Remove missing IDs
+}
+
+moduleGenesEntrez = lapply(moduleGenes, convertToEntrez)
+```
+
+```{r}
+# GO Enrichment Analysis
+goResults = lapply(moduleGenesEntrez, function(genes) {
+  enrichGO(gene          = genes,
+           OrgDb         = org.Hs.eg.db,
+           keyType       = "ENTREZID",
+           ont           = "BP",  # Biological Process
+           pAdjustMethod = "fdr",
+           pvalueCutoff  = 0.05)
+})
+
+# KEGG Pathway Enrichment
+keggResults = lapply(moduleGenesEntrez, function(genes) {
+  enrichKEGG(gene          = genes,
+             organism      = "hsa",  # Human
+             keyType       = "kegg",
+             pAdjustMethod = "fdr",
+             pvalueCutoff  = 0.05)
+})
+
+# Reactome Pathway Enrichment
+reactomeResults = lapply(moduleGenesEntrez, function(genes) {
+  enrichPathway(gene          = genes,
+                organism      = "human",
+                pAdjustMethod = "fdr",
+                pvalueCutoff  = 0.05)
+})
+```
+
+
+```{r}
+# helper function to print pathways ordered by gene ratio
+print_pathways <- function(Results, module="", pathway="Go", show_n=10){
+  # Extract the enrichment results as a data frame
+  go_df <- as.data.frame(Results)
+  
+  # Convert GeneRatio (which is in "x/y" format) to numeric
+  go_df$GeneRatioValue <- sapply(go_df$GeneRatio, function(x) {
+    eval(parse(text = x))
+  })
+  
+  # Take top 25 GO terms by GeneRatio
+  top_go <- go_df %>%
+    arrange(desc(GeneRatioValue)) %>%
+    slice_head(n = show_n)
+  
+  # Make Description a factor ordered by GeneRatioValue for plotting
+  top_go$Description <- str_wrap(top_go$Description, width = 40)
+  top_go$Description <- fct_reorder(top_go$Description, top_go$GeneRatioValue)
+  top_go$GeneRatioPercent <- top_go$GeneRatioValue * 100
+  top_go$GeneRatioPercent <- round(top_go$GeneRatioPercent, 2)
+  
+  # Plot using ggplot2
+  ggplot(top_go, aes(x = GeneRatioPercent, y = Description)) +
+    geom_point(aes(size = Count, color = -log10(p.adjust))) +
+    scale_color_gradient(low = "blue", high = "red") +
+    #scale_x_continuous(breaks = pretty(top_go$GeneRatioPercent, n = 5)) +
+    labs(
+      title = glue("{pathway} terms for {module}"),
+      x = "Gene Ratio (%)",
+      y = "",
+      color = "-log10(FDR)",
+      size = "Gene Count"
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(axis.text.y = element_text(size = 12))
+}
+
+```
+
+
+```{r}
+#dotplot(goResults$black, showCategory=10, title="GO Enrichment for Black Module")
+print_pathways(goResults$black, module="Black", pathway="GO")
+print_pathways(keggResults$black, module="Black", pathway="KEGG")
+print_pathways(reactomeResults$black, module="Black", pathway="Reactome")
+```
+
+```{r}
+print_pathways(goResults$blue, module="Blue", pathway="GO")
+print_pathways(keggResults$blue, module="Blue", pathway="KEGG")
+print_pathways(reactomeResults$blue, module="Blue", pathway="Reactome")
+```
+
+```{r}
+print_pathways(goResults$brown, module="Brown", pathway="GO")
+#dotplot(keggResults$brown, showCategory=10, title="KEGG Enrichment for Brown Module")
+#dotplot(reactomeResults$brown, showCategory=10, title="Reactome Enrichment for Brown Module")
+```
+
+```{r}
+dotplot(goResults$magenta, showCategory=10, title="GO Enrichment for Magenta Module")
+dotplot(keggResults$magenta, showCategory=10, title="KEGG Enrichment for Magenta Module")
+dotplot(reactomeResults$magenta, showCategory=10, title="Reactome Enrichment for Magenta Module")
+```
+
+```{r}
+print_pathways(goResults$pink, module="Pink", pathway="GO")
+print_pathways(keggResults$pink, module="Pink", pathway="KEGG")
+#dotplot(keggResults$pink, showCategory=10, title="KEGG Enrichment for Pink Module")
+print_pathways(reactomeResults$pink, module="Pink", pathway="Reactome")
+```
+
+```{r}
+dotplot(goResults$purple, showCategory=10, title="GO Enrichment for Purple Module")
+dotplot(keggResults$purple, showCategory=10, title="KEGG Enrichment for Purple Module")
+dotplot(reactomeResults$purple, showCategory=10, title="Reactome Enrichment for Purple Module")
+```
+
+```{r}
+#dotplot(goResults$red, showCategory=10, title="GO Enrichment for Red Module")
+#dotplot(keggResults$red, showCategory=10, title="KEGG Enrichment for Red Module")
+#dotplot(reactomeResults$red, showCategory=10, title="Reactome Enrichment for Red Module")
+```
+
+```{r}
+dotplot(goResults$turquoise, showCategory=10, title="GO Enrichment for Turquoise Module")
+dotplot(keggResults$turquoise, showCategory=10, title="KEGG Enrichment for Turquoise Module")
+dotplot(reactomeResults$turquoise, showCategory=10, title="Reactome Enrichment for Turquoise Module")
+```
+
+```{r}
+#dotplot(goResults$yellow, showCategory=10, title="GO Enrichment for Yellow Module")
+#dotplot(keggResults$yellow, showCategory=10, title="KEGG Enrichment for Yellow Module")
+dotplot(reactomeResults$yellow, showCategory=10, title="Reactome Enrichment for Yellow Module")
+```
+
+```{r}
+#dotplot(goResults$grey, showCategory=10, title="GO Enrichment for Grey Module")
+dotplot(keggResults$grey, showCategory=10, title="KEGG Enrichment for Grey Module")
+dotplot(reactomeResults$grey, showCategory=10, title="Reactome Enrichment for Grey Module")
+```
+
+
+
+

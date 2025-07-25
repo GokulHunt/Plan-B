@@ -1,0 +1,73 @@
+---
+title: "CMV vs Clones Data Generation"
+author: "Gokul Seshadri"
+date: "2025-02-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# loading the necessary libraries
+```{r, echo=FALSE, warning=FALSE, message = FALSE, results='hold'}
+library(dplyr)
+library(tibble)
+library(tidyverse)
+library(tidyr)
+library(tibble)
+```
+
+# creating the study dataset (without genes)
+```{r, echo=FALSE, warning=FALSE, message = FALSE, results='hold'}
+### Reading the required datasets
+clinical_df = read.csv('D:/MS/My Research/Plan B/Datagen/CorPlot_Data.csv') %>%
+  dplyr::rename(Lab_ID = Lab.ID)
+
+tot_readCounts_df = read.csv('D:/MS/My Research/Plan B/Datagen/total_readCounts.csv') %>%
+  dplyr::rename(Lab_ID = Lab.ID)
+
+clonotypes_df = read.csv('D:/MS/My Research/Plan B/Datagen/clonotype_stats.csv') %>%
+  dplyr::rename(Lab_ID = file_name)
+```
+
+# filtering the dataset
+```{r, echo=FALSE, warning=FALSE, message = FALSE, results='hold'}
+data_df = inner_join(clinical_df, tot_readCounts_df, by=c("Lab_ID"))
+data_df = inner_join(data_df, clonotypes_df, by=c("Lab_ID"))
+
+# removing those with invalid records
+data_df = data_df[data_df$CMV_status != '', ]
+data_df = data_df[data_df$race != "Not Obtained", ]
+
+# immune cell variables
+clonotypes = c('TRAD_unique', 'TRB_unique', 'TRG_unique', 'IGH_unique', 'IGK_unique', 'IGL_unique', 'TRAD_sum', 'TRB_sum', 'TRG_sum', 'IGH_sum', 'IGK_sum', 'IGL_sum')
+
+# null counts in each column
+sapply(data_df, function(x) sum(is.na(x)))
+
+# removing null rows in covariates
+columns_to_check =c('CMV_status', 'age', 'sex', 'race', 'educ', 'mortality',  'BMI', 'comorb_idx', 'smoke_stat', 'lymp', 'TRAD_sum', 'TRB_sum')
+filtered_df <- data_df %>% 
+                  filter(across(all_of(columns_to_check), ~ !is.na(.)))
+
+cat("\nFiltered data size:", nrow(filtered_df))
+```
+
+
+```{r}
+filtered_df = filtered_df %>%
+                rename(TRA_total = TRAD_sum,
+                       TRA_unique = TRAD_unique,
+                       TRB_total = TRB_sum,
+                       TRG_total = TRG_sum,
+                       IGH_total = IGH_sum,
+                       IGK_total = IGK_sum,
+                       IGL_total = IGL_sum)
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message = FALSE, results='hold'}
+write.csv(filtered_df, "D:/MS/My Research/Plan B/Datagen/CMV_clonotypes_data.csv", row.names = FALSE)
+```
+

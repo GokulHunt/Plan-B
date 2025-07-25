@@ -1,0 +1,226 @@
+---
+title: "Group differences using ANOVA"
+author: "Gokul Seshadri"
+date: "2024-10-19"
+output: html_document
+---
+
+```{r, cache=TRUE, warning=FALSE, results='hold', echo=FALSE, message = FALSE}
+# invoking necessary packages
+library("openxlsx")
+library("tidyr")
+library("dplyr")
+library("tidyverse")
+library("tibble")
+library("ggplot2")
+library("car")
+library("emmeans")
+library("lme4")
+library("glue")
+```
+
+# reading the dataframe and assigning factor levels
+```{r, cache=TRUE, warning=FALSE, results='hold', echo=FALSE, message = FALSE}
+# reading the combined dataframe
+data_df = read.csv('D:/MS/My Research/Plan B/Datasets/Final Datasets/CMV_clonotypes_lv.csv')
+
+# converting blocks and treatment into factors
+data_df$sex <- factor(data_df$sex)
+data_df$race <- factor(data_df$race, levels=c("Non-Hispanic White", "Non-Hispanic Black", "Hispanic", "Non-Hispanic Other"))
+data_df$smoke_stat <- factor(data_df$smoke_stat, levels=c("Never smokers", "Former smokers", "Current smokers"))
+data_df$CMV_status <- factor(data_df$CMV_status)
+
+# removing those with empty CMV status
+data_df = data_df[data_df$CMV_status != '', ]
+
+# immune cell variables
+clonotypes = c('TRA_total', 'TRB_total', 'TRG_total', 'TRA_unique', 'TRB_unique', 'TRG_unique')
+``` 
+
+### Pre-Processing
+
+```{r, cache=TRUE, error=FALSE, message = FALSE, warning=FALSE, results='hold', echo=FALSE}
+# null counts in each column
+sapply(data_df, function(x) sum(is.na(x)))
+
+# removing null rows in covariates
+columns_to_check =c('CMV_status', 'age', 'sex', 'race', 'mortality', 'lymp', 'TRA_total', 'TRB_total', 'TRA_unique', 'TRB_unique')
+
+data_df <- data_df %>% 
+                  filter(across(all_of(columns_to_check), ~ !is.na(.)))
+
+cat("\nFiltered data size:", nrow(data_df))
+```
+
+### Checking if there's any racial differences in the read counts
+```{r, cache=TRUE, warning=FALSE, results='hold', echo=FALSE, message = FALSE}
+# Initialize lists to store results
+sum_sq_terms_race <- list()
+p_values_race <- list()
+means_df_race <- data.frame()
+ad_hoc_df_race <- data.frame()
+
+sum_sq_terms_sex <- list()
+p_values_sex <- list()
+means_df_sex <- data.frame()
+
+sum_sq_terms_cmv <- list()
+p_values_cmv <- list()
+means_df_cmv <- data.frame()
+
+sum_sq_terms_smoke <- list()
+p_values_smoke <- list()
+means_df_smoke <- data.frame()
+ad_hoc_df_smoke <- data.frame()
+
+for (ic in clonotypes) {
+  formula <- as.formula(paste(ic, "~ age + sex + race + CMV_status + smoke_stat + total_readCount"))
+  model <- aov(formula, data = data_df)
+  anova_table <- Anova(model, type = "II")
+  print(paste(ic, ":"))
+  print(anova_table)
+  print("")
+  
+  # getting the results for race
+  sum_sq_terms_race[[ic]] <- round(anova_table['race', 'Sum Sq'], 4)
+  p_values_race[[ic]] <- round(anova_table['race', 'Pr(>F)'], 4)
+  
+  ad_hoc <- emmeans(model, pairwise ~ race)
+  
+  adhoc_means <- data.frame(ad_hoc$emmeans) %>% 
+    dplyr::select(race, emmean) %>%
+    mutate(clonotype = ic) %>%
+    dplyr::select(clonotype, race, emmean)
+  means_df_race <- bind_rows(means_df_race, adhoc_means)
+  
+  if (anova_table['race', 'Pr(>F)'] <= 0.05) {
+    # finding contrasts using Tukey's HSD test
+    tk_summary <- data.frame(ad_hoc$contrasts) %>% 
+      dplyr::select(contrast,p.value) %>%
+      filter(p.value <= 0.05)
+    tk_summary <- separate(tk_summary, contrast, into = c("group1", "group2"), sep = " - ") %>%
+      mutate(clonotype = ic) %>%
+      dplyr::select(clonotype, group1, group2, p.value)
+    
+    ad_hoc_df_race <- bind_rows(ad_hoc_df_race, tk_summary)
+  }
+  
+  # getting the results for sex
+  sum_sq_terms_sex[[ic]] <- round(anova_table['sex', 'Sum Sq'], 4)
+  p_values_sex[[ic]] <- round(anova_table['sex', 'Pr(>F)'], 4)
+  
+  ad_hoc <- emmeans(model, pairwise ~ sex)
+  
+  adhoc_means <- data.frame(ad_hoc$emmeans) %>% 
+    dplyr::select(sex, emmean) %>%
+    mutate(clonotype = ic) %>%
+    dplyr::select(clonotype, sex, emmean)
+  means_df_sex <- bind_rows(means_df_sex, adhoc_means)
+  
+  # getting the results for CMV
+  sum_sq_terms_cmv[[ic]] <- round(anova_table['CMV_status', 'Sum Sq'], 4)
+  p_values_cmv[[ic]] <- round(anova_table['CMV_status', 'Pr(>F)'], 4)
+  
+  ad_hoc <- emmeans(model, pairwise ~ CMV_status)
+  
+  adhoc_means <- data.frame(ad_hoc$emmeans) %>% 
+    dplyr::select(CMV_status, emmean) %>%
+    mutate(clonotype = ic) %>%
+    dplyr::select(clonotype, CMV_status, emmean)
+  means_df_cmv <- bind_rows(means_df_cmv, adhoc_means)
+  
+  # getting the results for smoke_stat
+  sum_sq_terms_smoke[[ic]] <- round(anova_table['smoke_stat', 'Sum Sq'], 4)
+  p_values_smoke[[ic]] <- round(anova_table['smoke_stat', 'Pr(>F)'], 4)
+  
+  ad_hoc <- emmeans(model, pairwise ~ smoke_stat)
+  
+  adhoc_means <- data.frame(ad_hoc$emmeans) %>% 
+    dplyr::select(smoke_stat, emmean) %>%
+    mutate(clonotype = ic) %>%
+    dplyr::select(clonotype, smoke_stat, emmean)
+  means_df_smoke <- bind_rows(means_df_smoke, adhoc_means)
+  
+  if (anova_table['smoke_stat', 'Pr(>F)'] <= 0.05) {
+    # finding contrasts using Tukey's HSD test
+    tk_summary <- data.frame(ad_hoc$contrasts) %>% 
+      dplyr::select(contrast,p.value) %>%
+      filter(p.value <= 0.05)
+    tk_summary <- separate(tk_summary, contrast, into = c("group1", "group2"), sep = " - ") %>%
+      mutate(clonotype = ic) %>%
+      dplyr::select(clonotype, group1, group2, p.value)
+    
+    ad_hoc_df_smoke <- bind_rows(ad_hoc_df_smoke, tk_summary)
+  }
+}
+
+ic_table_race <- data.frame(
+  clonotype = names(sum_sq_terms_race),
+  sum_sq = unlist(sum_sq_terms_race),
+  p_values = unlist(p_values_race)
+)
+
+ic_table_sex <- data.frame(
+  clonotype = names(sum_sq_terms_sex),
+  sum_sq = unlist(sum_sq_terms_sex),
+  p_values = unlist(p_values_sex)
+)
+
+ic_table_cmv <- data.frame(
+  clonotype = names(sum_sq_terms_cmv),
+  sum_sq = unlist(sum_sq_terms_cmv),
+  p_values = unlist(p_values_cmv)
+)
+
+ic_table_smoke <- data.frame(
+  clonotype = names(sum_sq_terms_smoke),
+  sum_sq = unlist(sum_sq_terms_smoke),
+  p_values = unlist(p_values_smoke)
+)
+```
+
+#### results for race
+```{r, cache=TRUE, warning=FALSE, results='hold', echo=FALSE, message = FALSE}
+print(ic_table_race)
+print(ad_hoc_df_race)
+print(means_df_race)
+```
+
+
+#### results for sex
+```{r, cache=TRUE, warning=FALSE, results='hold', echo=FALSE, message = FALSE}
+print(ic_table_sex)
+print(means_df_sex)
+```
+
+
+#### results for CMV
+```{r, cache=TRUE, warning=FALSE, results='hold', echo=FALSE, message = FALSE}
+print(ic_table_cmv)
+print(means_df_cmv)
+```
+
+#### results for sMOKE
+```{r, cache=TRUE, warning=FALSE, results='hold', echo=FALSE, message = FALSE}
+print(ic_table_smoke)
+print(ad_hoc_df_smoke)
+print(means_df_smoke)
+```
+
+# saving results to an excel sheet in R
+```{r, cache=TRUE, warning=FALSE, results='hold', echo=FALSE, message = FALSE}
+data_frames = list("race_ANOVA" = ic_table_race,
+                   "race_trt_means" = means_df_race,
+                   "race_Tukey's" = ad_hoc_df_race,
+                   "sex_ANOVA" = ic_table_sex,
+                   "sex_trt_means" = means_df_sex,
+                   "cmv_ANOVA" = ic_table_cmv,
+                   "cmv_trt_means" = means_df_cmv,
+                   "smoke_ANOVA" = ic_table_smoke,
+                   "smoke_trt_means" = means_df_smoke,
+                   "smoke_Tukey's" = ad_hoc_df_smoke)
+
+write.xlsx(data_frames,
+           file = "D:/MS/My Research/Plan B/Code/Preliminary Analysis/T_clones_ANOVA_results.xlsx")
+```
+

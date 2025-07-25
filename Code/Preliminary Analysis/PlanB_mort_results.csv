@@ -1,0 +1,7 @@
+Chain,Metric,odds_ratio,conf_low,conf_high,p.value
+TRA,unique,0.7573,0.6421,0.8894,8.00E-04
+TRB,unique,0.7755,0.6628,0.9041,0.0013
+TRG,unique,1.0214,0.891,1.1647,0.7564
+TRA,total,0.8169,0.696,0.9542,0.012
+TRB,total,0.8259,0.7108,0.954,0.0108
+TRG,total,1.0041,0.8809,1.1315,0.9485

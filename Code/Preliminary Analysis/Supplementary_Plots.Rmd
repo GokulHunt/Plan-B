@@ -1,0 +1,271 @@
+---
+title: "Project_Plots"
+author: "Gokul Seshadri"
+date: "2024-12-10"
+output: html_document
+---
+
+```{r, echo=FALSE, warning=FALSE, message = FALSE, results='hold', cache=TRUE}
+# invoking necessary packages
+library("dplyr")
+library("tidyr")
+library("tidyverse")
+library("tibble")
+library("reshape2")
+library("multcompView")
+library("car")
+
+library('broom.mixed')
+library("ggplot2")
+library("glue")
+library("knitr")
+
+library("tableone")
+library("labelled")
+library("MatchIt")
+library("survey")
+library("readxl")
+```
+
+### Checking the correlations and distributions
+
+```{r, cache=TRUE, warning=FALSE, results='hold', echo=FALSE, message = FALSE}
+# reading the combined dataframe
+data_df = read.csv('D:/MS/My Research/Plan B/Datasets/Final Datasets/CMV_clonotypes_lv.csv')
+
+# converting blocks and treatment into factors
+data_df$sex <- factor(data_df$sex)
+data_df$race <- factor(data_df$race, levels=c("Non-Hispanic White", "Non-Hispanic Black", "Hispanic", "Non-Hispanic Other"))
+data_df$smoke_stat <- factor(data_df$smoke_stat, levels=c("Never smokers", "Former smokers", "Current smokers"))
+data_df$CMV_status <- factor(data_df$CMV_status)
+
+# removing those with empty CMV status
+data_df = data_df[data_df$CMV_status != '', ]
+
+# immune cell variables
+clonotypes = c('TRA_total', 'TRB_total', 'TRG_total', 'TRA_unique', 'TRB_unique', 'TRG_unique')
+``` 
+
+
+```{r, cache=TRUE, error=FALSE, message = FALSE, warning=FALSE, results='hold', echo=FALSE}
+# null counts in each column
+sapply(data_df, function(x) sum(is.na(x)))
+
+# removing null rows in covariates
+columns_to_check =c('CMV_status', 'age', 'sex', 'race', 'mortality', 'lymp', 'TRA_total', 'TRB_total', 'TRA_unique', 'TRB_unique')
+
+data_df <- data_df %>% 
+                  filter(across(all_of(columns_to_check), ~ !is.na(.)))
+
+cat("\nFiltered data size:", nrow(data_df))
+```
+
+```{r, cache=TRUE, error=FALSE, message = FALSE, warning=FALSE, results='hold', echo=FALSE}
+# 'CD8N', 'CD8eff', 'CD8EM', 'CD8CM', 'CD4N', 'CD4eff', 'CD4EM', 'CD4CM',
+df = data_df[, c('Tcells', 'CD4', 'CD4N', 'CD4CM',
+                 'CD8', 'CD8N', 'CD8CM',
+                 'TRA_total', 'TRB_total', 'TRA_unique', 'TRB_unique')]
+cor_matrix = cor(df, method = "spearman", use = "complete.obs")
+corrplot(cor_matrix, method = "color", type = "lower", 
+         addCoef.col = "black", number.cex = 0.8, 
+         tl.col = "black", tl.srt = 45, col = colorRampPalette(c("blue", "white", "red"))(200))
+```
+
+```{r}
+# Pivot the dataset from wide to long format
+df_long <- filtered_df[, c('TRA_total', 'TRB_total', 'TRG_total')] %>%
+  pivot_longer(cols = c(TRA_total, TRB_total, TRG_total),
+               names_to = "Clones",
+               values_to = "Count")
+
+ggplot(df_long, aes(x = Clones, y = Count, fill = Clones)) +
+  geom_boxplot() +
+  scale_fill_brewer(palette = "Set2") +  
+  labs(title = "Distribution of TCR Chains", x = "", y = "Total Counts") +
+  theme_minimal() +
+    theme(
+      axis.title = element_text(size = 12, face = "bold"),
+      axis.text = element_text(size = 10),
+      plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+      legend.position = "bottom"
+    )
+```
+
+### Forest Plots for mortality
+
+```{r}
+forest_plot <- function(df, title_text){
+  # Adding offset to create a gap between outcomes
+  #df = df[df$Chain %in% c("TRB", "TRA"), ]
+  df$Chain = factor(df$Chain, levels = c("TRG", "TRB", "TRA"))
+  print(as.numeric(df$Chain))
+  df$type_offset <- as.numeric(df$Chain) + 
+    ifelse(df$Metric == "total", 0.1, -0.1)
+  print(df$type_offset)
+  
+  # Create the forest plot
+  ggplot(df, aes(x = odds_ratio, y = type_offset, color = Metric, shape = Metric)) +
+    geom_point(size = 3) + # Points for treatment effect
+    geom_errorbarh(aes(xmin = conf_low, xmax = conf_high), height = 0.2) + 
+    scale_y_continuous(
+      breaks = 1:length(unique(df$Chain)),
+      labels = levels(df$Chain)
+    ) +
+    geom_vline(xintercept = 1, linetype = "dashed", color = "black", size = 1) +
+    labs(
+      x = "Odds Ratio's (with 95% CI)", 
+      y = "Tcell Receptor Chains",
+      title = glue("{title_text}: Clones vs Mortality"),
+      color = "Metric",
+      shape = "Metric"
+    ) +
+    theme_minimal() +
+    theme(
+      axis.title = element_text(size = 12, face = "bold"),
+      axis.text = element_text(size = 10),
+      plot.title = element_text(size = 14, face = "bold", hjust = 0.5)
+    ) +
+    scale_color_manual(values = c("total" = "maroon", "unique" = "orange"))
+}
+```
+
+#### Whole data
+
+```{r, echo=FALSE, warning=FALSE, message = FALSE, results='hold', cache=TRUE}
+# Results data for ATE
+data_df = read_csv("D:/MS/My Research/Plan B/Code/Preliminary Analysis/PlanB_mort_results.csv")
+
+forest_plot(data_df, title_text = "Full Adjustment")
+```
+
+<br>
+
+
+### Bar Charts for treatment means
+
+#### race
+
+```{r}
+race_results = read_excel("D:/MS/My Research/Plan B/Code/Preliminary Analysis/T_clones_ANOVA_results.xlsx", sheet = 'race_trt_means')
+
+T_race_results = race_results[race_results$clonotype %in% c('TRA_total', 'TRA_unique', 'TRB_total', 'TRB_unique'), ]
+
+# Create the bar chart
+ggplot(T_race_results, aes(x = clonotype, y = emmean, fill = race)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.6) +
+  scale_fill_manual(values = c("Hispanic" = "orange", "Black" = "maroon", "Other" = "darkgreen", "White" = "blue")) +
+  labs(x = "", y = "Adjusted Mean Value", fill = "Race", title = "Racial differences") +
+  theme_minimal() +
+    theme(
+      axis.title = element_text(size = 12, face = "bold"),
+      axis.text = element_text(size = 10),
+      plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+      legend.position = "bottom"
+    )
+
+```
+
+
+#### sex
+
+```{r}
+sex_results = read_excel("D:/MS/My Research/Plan B/Code/Preliminary Analysis/T_clones_ANOVA_results.xlsx", sheet = 'sex_trt_means')
+
+T_sex_results = sex_results[sex_results$clonotype %in% c('TRA_total', 'TRA_unique', 'TRB_total', 'TRB_unique'), ]
+
+# Create the bar chart
+ggplot(T_sex_results, aes(x = clonotype, y = emmean, fill = sex)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.6) +
+  scale_fill_manual(values = c("Female" = "maroon",  "Male" = "orange")) +
+  labs(x = "", y = "Adjusted Mean Value", fill = "Biological Sex", title = "Sex differences") +
+  theme_minimal() +
+    theme(
+      axis.title = element_text(size = 12, face = "bold"),
+      axis.text = element_text(size = 10),
+      plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+      legend.position = "bottom"
+    )
+
+```
+
+
+#### CMV Serostatus
+
+```{r}
+cmv_results = read_excel("D:/MS/My Research/Plan B/Code/Preliminary Analysis/T_clones_ANOVA_results.xlsx", sheet = 'cmv_trt_means')
+
+T_cmv_results = cmv_results[cmv_results$clonotype %in% c('TRA_total', 'TRA_unique', 'TRB_total', 'TRB_unique'), ]
+
+# Create the bar chart
+ggplot(T_cmv_results, aes(x = clonotype, y = emmean, fill = CMV_status)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.6) +
+  scale_fill_manual(values = c("Positive" = "maroon",  "Negative" = "orange")) +
+  labs(x = "", y = "Adjusted Mean Value", fill = "CMV Serostatus", title = "Differences by CMV Status") +
+  theme_minimal() +
+    theme(
+      axis.title = element_text(size = 12, face = "bold"),
+      axis.text = element_text(size = 10),
+      plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+      legend.position = "bottom"
+    )
+
+```
+
+
+#### Smoking Status
+
+```{r}
+smoke_results = read_excel("D:/MS/My Research/Plan B/Code/Preliminary Analysis/T_clones_ANOVA_results.xlsx", sheet = 'smoke_trt_means')
+
+T_smoke_results = smoke_results[smoke_results$clonotype %in% c('TRA_total', 'TRA_unique', 'TRB_total', 'TRB_unique'), ]
+
+# Create the bar chart
+ggplot(T_smoke_results, aes(x = clonotype, y = emmean, fill = smoke_stat)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.6) +
+  scale_fill_manual(values = c("Current" = "maroon",  "Former" = "blue", "Never" = "orange")) +
+  labs(x = "Clones", y = "Adjusted Mean Value", fill = "Smoking Status", title = "Differences by Smoking Status") +
+  theme_minimal() +
+    theme(
+      axis.title = element_text(size = 12, face = "bold"),
+      axis.text = element_text(size = 10),
+      plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+      legend.position = "bottom"
+    )
+```
+
+### Forest Plots for ATE using CMV
+
+```{r, echo=FALSE, warning=FALSE, message = FALSE, results='hold', cache=TRUE}
+# Results data for ATE
+df = read_excel("D:/MS/My Research/Plan B/Code/Preliminary Analysis/ATE_Forest_Plot_Data.xlsx")
+#df= df[!df$Model %in% c('IPW'), ]
+
+# Adding offset to create a gap between outcomes
+df$type_offset <- as.numeric(as.factor(df$Model)) + 
+  ifelse(df$Outcome == "TRAB", 0.1, -0.1)
+
+# Create the forest plot
+ggplot(df, aes(x = ATE, y = type_offset, color = Outcome, shape = Outcome)) +
+  geom_point(size = 3) + # Points for treatment effect
+  geom_errorbarh(aes(xmin = Lower_CI, xmax = Upper_CI), height = 0.2) + 
+  scale_y_continuous(
+    breaks = 1:length(unique(df$Model)),
+    labels = levels(as.factor(df$Model))
+  ) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black", size = 1) +
+  labs(
+    x = "ATE (with 95% CI)", 
+    y = "",
+    title = "Effect of CMV on T-cell repertoire",
+    color = "Outcome",
+    shape = "Outcome"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.title = element_text(size = 12, face = "bold"),
+    axis.text = element_text(size = 10),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+  ) +
+  scale_color_manual(values = c("TRAB" = "maroon", "CD4N_pct" = "orange"))
+
+```

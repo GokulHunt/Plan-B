@@ -1,0 +1,152 @@
+---
+title: "Run Mort Models"
+author: "Gokul Seshadri"
+date: "2025-02-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, cache=TRUE, warning=FALSE, results='hold', echo=FALSE, message = FALSE}
+# invoking necessary packages
+library(dplyr)
+library(tibble)
+library(corrplot)
+library(margins)
+library(broom)
+library(vroom)
+library(glue)
+library(stats)
+library(stringr)
+library(knitr)
+library(writexl)
+```
+
+### **Reading the dataframe and assigning factor levels**
+
+```{r, cache=TRUE, error=FALSE, message = FALSE, warning=FALSE, results='hold', echo=FALSE}
+# reading the combined dataframe
+data_df = read.csv('D:/MS/My Research/Plan B/Datasets/Final Datasets/CMV_clonotypes_lv.csv')
+
+# converting blocks and treatment into factors
+data_df$sex <- factor(data_df$sex)
+data_df$race <- factor(data_df$race, levels=c("Non-Hispanic White", "Non-Hispanic Black", "Hispanic", "Non-Hispanic Other"))
+data_df$smoke_stat <- factor(data_df$smoke_stat, levels=c("Never smokers", "Former smokers", "Current smokers"))
+data_df$CMV_status <- factor(data_df$CMV_status)
+
+# removing those with empty CMV status
+data_df = data_df[data_df$CMV_status != '', ]
+
+# immune cell variables
+clonotypes = c('TRA_total', 'TRB_total', 'TRG_total',
+               'TRA_unique', 'TRB_unique', 'TRG_unique')
+```
+
+### **Pre-Processing**
+
+```{r, cache=TRUE, error=FALSE, message = FALSE, warning=FALSE, results='hold', echo=FALSE}
+# null counts in each column
+sapply(data_df, function(x) sum(is.na(x)))
+
+# removing null rows in covariates
+columns_to_check =c('CMV_status', 'age', 'sex', 'race', 'mortality', 'lymp', 'TRA_total', 'TRB_total')
+filtered_df <- data_df %>% 
+                  filter(across(all_of(columns_to_check), ~ !is.na(.)))
+
+cat("\nFiltered data size:", nrow(filtered_df))
+```
+
+```{r, cache=TRUE, error=FALSE, message = FALSE, warning=FALSE, results='hold', echo=FALSE}
+columns_to_scale = c("age", "lymp", "WBC", "CD4N_pct", "educ", "INFLAM_5", "comorb_idx", "BMI", 'total_readCount', clonotypes)
+
+# Scaling
+filtered_df[columns_to_scale] = lapply(filtered_df[columns_to_scale], scale)
+```
+
+```{r}
+# Helper function to run mortality models for all the clones
+run_mort_models <- function(df, clonotypes, covariates="") {
+  
+  # Initialize an empty list to store the results
+  results_list <- list()
+  
+  for (clone in clonotypes) {
+    # Construct the formula properly
+    formula_str <- if (covariates != "") {
+      glue("mortality ~ {clone} {covariates}")
+    } else {
+      glue("mortality ~ {clone}")
+    }
+    
+    # Fit the logistic regression model
+    mod <- glm(as.formula(formula_str), data=df, family=binomial(link="logit"))
+    
+    # Extract coefficients
+    mod_summary <- tidy(mod, conf.int = TRUE) %>%
+      mutate(
+        odds_ratio = round(exp(estimate), 4),   # Convert log(OR) to OR
+        conf_low = round(exp(conf.low), 4),     # Lower 95% CI
+        conf_high = round(exp(conf.high), 4),   # Upper 95% CI
+        p.value = round(p.value, 4),
+      ) %>%
+      dplyr::select(term, odds_ratio, conf_low, conf_high, p.value) 
+    
+    # Filter only the row for the current clone and store in list
+    results_list[[clone]] <- mod_summary %>%
+      dplyr::filter(str_detect(term, clone))
+    
+    # Display table
+    print(kable(mod_summary, caption = glue("mortality ~ {clone} {covariates}")))
+    
+    #print(Anova(mod, type = "III"))
+  }
+  
+  # Combine all results into a single dataframe
+  results_df <- bind_rows(results_list)
+  
+  return(results_df)
+}
+```
+
+
+### 1) Full Dataset
+
+#### Baseline Adj
+
+```{r}
+covariates = "+ age + sex + race + educ + smoke_stat + CMV_status + total_readCount"
+
+data_results_b = run_mort_models(filtered_df, clonotypes, covariates)
+
+kable(data_results_b, caption = "Baseline Adjustment")
+```
+
+<br>
+
+#### Full Adjustment
+
+```{r}
+covariates = "+ age + sex + race + educ + smoke_stat + CMV_status + total_readCount + BMI + INFLAM_5 + comorb_idx"
+
+data_results_f = run_mort_models(filtered_df, clonotypes, covariates)
+
+kable(data_results_f, caption = "Full Adjustment")
+```
+
+```{r}
+data_results_b$Adj = "Baseline"
+data_results_f$Adj = "Full"
+
+# Combining the results
+data_results = rbind(data_results_b, data_results_f)
+
+dim(data_results)
+```
+
+```{r}
+write.csv(data_results, 'D:/MS/My Research/Plan B/Code/Preliminary Analysis/mort_results.csv', row.names = FALSE)
+```
+
+

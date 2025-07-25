@@ -1,7 +1,7 @@
 # Statistics M.S. Capstone Project
 ### The Impact of CMV on T Cell Repertoire: Insights from Transcriptomic Data Analysis
 
-**Author:** Gokul Seshadri (sesha059@umn.edu)  
+**Author:** Gokul Seshadri  
 **Advisors:** Bharat Thyagarajan and Adam Rothman
 
 This project uses data from the Health and Retirement Study (HRS) to show that CMV impacts T-cell repertoire through certain biological pathways, and elucidates which of these pathways contributes to decreased mortality odds associated with T-cell repertoire. The findings on mortality are validated in an independt cohort of long-lived individuals.
